@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "mcprotocol": "^0.1.2",
+    "mqtt": "^5.15.1",
+    "serialport": "^13.0.0"
+  }
+}
