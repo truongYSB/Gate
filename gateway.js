@@ -2,11 +2,13 @@ const mqtt = require('mqtt');
 const { SerialPort } = require('serialport');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-const BROKER_URL = 'ws://http://103.238.69.131:8089/mqtt';
+const BROKER_URL = 'ws://localhost:9001';
 const mqttClient = mqtt.connect(BROKER_URL);
 const PLC_PORT_NAME = 'COM4';
 
 const port = new SerialPort({ path: PLC_PORT_NAME, baudRate: 9600, dataBits: 7, parity: 'even', stopBits: 1 });
+const express = require("express");
+const app = express();
 
 let pendingResolve = null;
 // 1. TẠO MỘT MẢNG ĐỂ GOM TẤT CẢ DỮ LIỆU
@@ -166,25 +168,28 @@ mqttClient.on('message', (topic, message) => {
     }
 
     // 3. Lệnh M_ON / M_OFF thông thường từ Unity
-// 3. XỬ LÝ LỆNH TỪ UNITY (Hỗ trợ cả Lệnh Đơn và Lệnh Gộp cách nhau bởi dấu phẩy)
+    // 3. XỬ LÝ LỆNH TỪ UNITY (Hỗ trợ cả Lệnh Đơn và Lệnh Gộp cách nhau bởi dấu phẩy)
     if (msg.includes('_ON') || msg.includes('_OFF')) {
         actionQueue.push(async () => {
             // Tách các lệnh nếu có dấu phẩy (vd: "M0_OFF,M1_OFF,M2_ON")
-            let commands = msg.split(','); 
+            let commands = msg.split(',');
+            
+            // Làm mới payload cho mỗi vòng đời gửi (để tránh rác dữ liệu từ các lần trước)
+            payload = [];
 
             // 1. VIẾT TRẠNG THÁI M LIÊN TỤC XUỐNG PLC
             for (let cmd of commands) {
                 let cleanCmd = cmd.trim();
-                if(!cleanCmd) continue;
+                if (!cleanCmd) continue;
 
                 let [mName, state] = cleanCmd.split('_');
                 let mNumber = mName.replace('M', '');
 
                 console.log(`⚙️ [XỬ LÝ BATCH] Đang gửi lệnh xuống PLC: ${mName} -> ${state}`);
                 await setMState(mNumber, state === "ON");
-                
+
                 // Nghỉ rất ngắn (50ms) giữa các lệnh ghi để phần cứng PLC xử lý kịp
-                await delay(50); 
+                await delay(50);
             }
 
             // Nghỉ 400ms chờ PLC thực thi xong toàn bộ logic Relay
@@ -200,14 +205,14 @@ mqttClient.on('message', (topic, message) => {
             if (mVal !== -1) {
                 for (let i = 0; i <= 2; i++) { // Chỉ gửi M0, M1, M2
                     let isON = (mVal & (1 << i)) !== 0;
-                    payload.push(`M${i}_${isON ? 'ON' : 'OFF'}`); 
+                    payload.push(`M${i}_${isON ? 'ON' : 'OFF'}`);
                 }
             }
 
             if (yVal !== -1) {
                 for (let i = 1; i <= 2; i++) { // Chỉ gửi Y1, Y2
                     let isON = (yVal & (1 << i)) !== 0;
-                    payload.push(`Y${i}_${isON ? 'ON' : 'OFF'}`); 
+                    payload.push(`Y${i}_${isON ? 'ON' : 'OFF'}`);
                 }
             }
 
@@ -216,9 +221,25 @@ mqttClient.on('message', (topic, message) => {
             // 4. GỬI ĐÚNG 1 TIN NHẮN CHỨA TOÀN BỘ TRẠNG THÁI LÊN UNITY
             let finalMessage = payload.join(',');
             mqttClient.publish('iot/lab602/dieu_khien_plc/status', finalMessage);
-            
+
             console.log(`📤 [HOÀN TẤT] Đã xử lý cụm lệnh: [${msg}]`);
         });
         processActionQueue();
     }
+});
+
+// ---------------------------------------------------------
+// API ENDPOINT FOR HEALTH CHECK
+// ---------------------------------------------------------
+app.get("/health", (req, res) => {
+    res.json({
+        service: "PLC2",
+        status: "running",
+        mqtt: mqttClient.connected,
+        com: port.isOpen
+    });
+});
+
+app.listen(5003, () => {
+    console.log("PLC2 HTTP chạy ở cổng 5003");
 });

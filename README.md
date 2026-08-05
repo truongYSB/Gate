@@ -11,5 +11,9 @@ Lệnh OFF: STX + '8' + Địa chỉ M0 đảo byte ('0008') + ETX + Checksum ('
 # Broker URL
 ## Test local
 ws://localhost:9001/mqtt
-## Cho Server
+## Cho Server (Cloud MQTT)
 mqtt://broker.emqx.io:1883
+## Cho Server (Mosquitto)
+ws://localhost:9001
+
+(Lưu ý: Đối với backend Node.js, bạn cũng có thể dùng giao thức MQTT thuần để tối ưu hiệu suất bằng cách trỏ vào cổng 1883: const BROKER_URL = 'mqtt://localhost:1883';. Cả hai đều chạy tốt với Mosquitto).
