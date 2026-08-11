@@ -31,7 +31,11 @@ let rxBuffer = Buffer.alloc(0);
 let heartbeatTimer = null;
 const HEARTBEAT_TIMEOUT = 5000;
 
-port.on('open', () => console.log(`✅ Đã mở và chiếm dụng cổng ${PLC_PORT_NAME}`));
+port.on('open', () => {
+    console.log(`✅ Đã mở và chiếm dụng cổng ${PLC_PORT_NAME}`);
+    mqttClient.publish('iot/lab602/dieu_khien_plc/status', 'GATEWAY_READY');
+});
+
 port.on('close', () => console.log(`🔒 Đã nhả cổng ${PLC_PORT_NAME}`));
 port.on('error', (err) => console.log(`❌ Lỗi cổng COM:`, err.message));
 
@@ -332,11 +336,11 @@ mqttClient.on('message', (topic, message) => {
                 for (let i = 0; i <= 7; i++) {
                     payload.push(`M${i}_${(mVal & (1 << i)) ? 'ON' : 'OFF'}`);
                 }
-                // Gửi toàn bộ 2 bit Y (Y1 -> Y2)
-                for (let i = 1; i <= 2; i++) {
+                // Gửi toàn bộ 8 bit Y (Y0 -> Y7)
+                for (let i = 0; i <= 7; i++) {
                     payload.push(`Y${i}_${(yVal & (1 << i)) ? 'ON' : 'OFF'}`);
                 }
-                payload.push('ACTION_DONE');
+                payload.push('SYNC_DONE');
 
                 let finalMessage = payload.join(',');
                 mqttClient.publish('iot/lab602/dieu_khien_plc/status', finalMessage);
@@ -423,7 +427,7 @@ mqttClient.on('message', (topic, message) => {
                 }
 
                 // LUÔN gửi kèm trạng thái Y vì mạch logic PLC có thể tự bật/tắt Y
-                for (let i = 1; i <= 2; i++) {
+                for (let i = 0; i <= 7; i++) {
                     let isON = (yVal & (1 << i)) !== 0;
                     payload.push(`Y${i}_${isON ? 'ON' : 'OFF'}`);
                 }
