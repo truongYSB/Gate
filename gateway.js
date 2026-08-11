@@ -354,6 +354,7 @@ mqttClient.on('message', (topic, message) => {
         actionQueue.push(async () => {
             if (!port.isOpen) {
                 console.log("⚠️ Bỏ qua lệnh do cổng COM chưa mở!");
+                mqttClient.publish('iot/lab602/dieu_khien_plc/status', 'ACTION_FAILED');
                 return;
             }
 
