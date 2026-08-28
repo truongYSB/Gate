@@ -2,20 +2,26 @@ const mqtt = require('mqtt');
 const { SerialPort } = require('serialport');
 const express = require("express");
 
+// ==========================================
+// 1. KHAI BÁO KÝ TỰ ĐIỀU KHIỂN (Sửa lỗi ENQ is not defined)
+// ==========================================
+const ENQ = '\x05'; 
+
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const BROKER_URL = 'ws://localhost:9001';
 const mqttClient = mqtt.connect(BROKER_URL);
 const PLC_PORT_NAME = 'COM8';
 
-//Lưu đệm trạng thái M để không phải xuống PLC đọc lại mỗi lần nhấn nút
+// BIẾN QUAN TRỌNG: Lưu đệm trạng thái M để không phải xuống PLC đọc lại mỗi lần nhấn nút
 let cachedMState = 0;
 const TARGET_D_REGISTERS = [100, 102];
+
 const port = new SerialPort({
     path: PLC_PORT_NAME,
     baudRate: 9600,
     dataBits: 7,
-    parity: 'even',
+    parity: 'odd',
     stopBits: 1,
     autoOpen: false
 });
@@ -138,26 +144,26 @@ async function executeWithRetry(frame, validateFunc, retryName) {
     return null;
 }
 
-function buildReadFrame(addressHex, countHex) {
-    let payload = '0' + addressHex + countHex + '\x03';
-    let checksum = calculateChecksum(payload);
-    return Buffer.from('\x02' + payload + checksum, 'ascii');
-}
+// ==========================================
+// ĐÓNG GÓI LỆNH THEO CHUẨN DEDICATED (FORM 1)
+// ==========================================
+function buildFrameForm1(cmd, deviceType, deviceNoStr, countStr, dataStr = "") {
+    let station = "00";   // Trạm 00 theo cấu hình
+    let pcNo = "FF";      // Số PC mặc định
+    let waitTime = "0";   // 0ms chờ
 
-function buildWriteByteFrame(addressHex, countHex, valueInt) {
-    let hexData = valueInt.toString(16).padStart(2, '0').toUpperCase();
-    let payload = '1' + addressHex + countHex + hexData + '\x03';
-    let checksum = calculateChecksum(payload);
-    return Buffer.from('\x02' + payload + checksum, 'ascii');
-}
+    // BẢN VÁ LỖI TIMEOUT: Tự động thêm dấu cách nếu deviceType chỉ có 1 ký tự
+    // Ví dụ: "D" sẽ tự động biến thành "D " để chuẩn xác độ dài 2 byte của Mitsubishi
+    if (deviceType.length === 1) {
+        deviceType = deviceType + " ";
+    }
 
-async function writeMByte(valueInt) {
-    let frame = buildWriteByteFrame('0100', '01', valueInt);
-    let res = await executeWithRetry(frame, (data) => {
-        if (data && data[0] === 0x15) console.log(`⚠️ PLC NAK (0x15) - Lệnh ghi bị từ chối!`);
-        return (data && data[0] === 0x06);
-    }, "GHI LẠI BATCH");
-    return res !== null;
+    // Ghép Payload (Phần lõi để tính Checksum)
+    let payload = station + pcNo + cmd + waitTime + deviceType + deviceNoStr + countStr + dataStr;
+    let checksum = calculateChecksum(payload);
+
+    // Gửi đi bắt đầu bằng ENQ (0x05), không dùng CR LF
+    return Buffer.from(ENQ + payload + checksum, 'ascii');
 }
 
 function validateResponseChecksum(resBuffer) {
@@ -170,50 +176,73 @@ function validateResponseChecksum(resBuffer) {
     return receivedChecksum === calculateChecksum(payloadToCheck);
 }
 
-async function readYState() {
-    let frame = buildReadFrame('00A0', '01');
+// ==========================================
+// CÁC HÀM GIAO TIẾP PLC (DEDICATED PROTOCOL)
+// ==========================================
+
+async function writeMByte(valueInt) {
+    // Ép giá trị nguyên thành chuỗi Hex 4 ký tự (Word Write - 16 bit)
+    let hexData = valueInt.toString(16).padStart(4, '0').toUpperCase();
+
+    // Gửi lệnh WW (Word Write) vào M0000, số lượng 01 Word
+    let frame = buildFrameForm1("WW", "M", "0000", "01", hexData);
+
     let res = await executeWithRetry(frame, (data) => {
-        return (data && data[0] === 0x02 && validateResponseChecksum(data));
+        if (data && data[0] === 0x15) console.log(`⚠️ PLC NAK (0x15) - Lệnh ghi bị từ chối!`);
+        return (data && data[0] === 0x06); // 0x06 là ACK (Xác nhận ghi thành công)
+    }, "GHI LẠI BATCH");
+
+    return res !== null;
+}
+
+async function readYState() {
+    // Gửi lệnh WR (Word Read) đọc 1 Word (16 bit) từ Y0000
+    let frame = buildFrameForm1("WR", "Y", "0000", "01");
+    let res = await executeWithRetry(frame, (data) => {
+        return (data && data[0] === 0x02 && validateResponseChecksum(data)); // 0x02 là STX
     }, "ĐỌC LẠI Y");
-    return res ? parseInt(res.toString('ascii', 1, 3), 16) : -1;
+
+    if (res) {
+        // Cấu trúc Data trả về: STX(1) + 00FF(4) + DATA(4) + ETX(1) + Checksum(2)
+        // Vị trí DATA nằm từ index 5, dài 4 ký tự
+        let hexStr = res.toString('ascii', 5, 9);
+        let value = parseInt(hexStr, 16);
+        return value & 0xFF; // Chỉ lấy 8 bit thấp (Y0-Y7) để tương thích chuẩn cũ
+    }
+    return -1;
 }
 
 async function readMState() {
-    let frame = buildReadFrame('0100', '01');
+    // Gửi lệnh WR (Word Read) đọc 1 Word từ M0000
+    let frame = buildFrameForm1("WR", "M", "0000", "01");
     let res = await executeWithRetry(frame, (data) => {
         return (data && data[0] === 0x02 && validateResponseChecksum(data));
     }, "ĐỌC LẠI M");
-    return res ? parseInt(res.toString('ascii', 1, 3), 16) : -1;
+
+    if (res) {
+        let hexStr = res.toString('ascii', 5, 9);
+        let value = parseInt(hexStr, 16);
+        return value & 0xFF; // Chỉ lấy 8 bit thấp (M0-M7)
+    }
+    return -1;
 }
 
 async function readDRegister(dNumber) {
-    // 1. Tính toán địa chỉ Hex: Base(0x1000) + (dNumber * 2)
-    let address = 0x1000 + (dNumber * 2);
-    let addressHex = address.toString(16).toUpperCase().padStart(4, '0');
-
-    // 2. Yêu cầu đọc 2 bytes ('02') cho 1 thanh ghi 16-bit
-    let frame = buildReadFrame(addressHex, '02');
+    let dStr = dNumber.toString().padStart(4, '0');
+    // Đọc thanh ghi D yêu cầu đọc đúng 01 Word (16 bit)
+    let frame = buildFrameForm1("WR", "D", dStr, "01");
 
     let res = await executeWithRetry(frame, (data) => {
         return (data && data[0] === 0x02 && validateResponseChecksum(data));
     }, `ĐỌC THANH GHI D${dNumber}`);
 
     if (res) {
-        // Gói tin chuẩn: STX(1) + DATA(4 ASCII) + ETX(1) + Checksum(2)
-        // Lấy 4 ký tự Hex của dữ liệu
-        let hexStr = res.toString('ascii', 1, 5);
+        let hexStr = res.toString('ascii', 5, 9);
+        let value = parseInt(hexStr, 16); // Form 1 là Big-Endian, ép kiểu trực tiếp!
 
-        // Giao thức trả về Byte thấp trước, Byte cao sau -> Cần đảo ngược lại
-        let lowByte = hexStr.substring(0, 2);
-        let highByte = hexStr.substring(2, 4);
+        // Xử lý số nguyên âm
+        if (value >= 0x8000) value = value - 0x10000;
 
-        // Chuyển Hex thành số nguyên (Thập phân)
-        let value = parseInt(highByte + lowByte, 16);
-
-        // Xử lý số âm (nếu bit cao nhất là 1, tức là giá trị >= 32768)
-        if (value >= 0x8000) {
-            value = value - 0x10000;
-        }
         return value;
     }
     return null;
