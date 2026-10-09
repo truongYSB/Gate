@@ -2,26 +2,20 @@ const mqtt = require('mqtt');
 const { SerialPort } = require('serialport');
 const express = require("express");
 
-// ==========================================
-// 1. KHAI BÁO KÝ TỰ ĐIỀU KHIỂN (Sửa lỗi ENQ is not defined)
-// ==========================================
-const ENQ = '\x05'; 
-
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const BROKER_URL = 'ws://localhost:9001';
 const mqttClient = mqtt.connect(BROKER_URL);
 const PLC_PORT_NAME = 'COM8';
 
-// BIẾN QUAN TRỌNG: Lưu đệm trạng thái M để không phải xuống PLC đọc lại mỗi lần nhấn nút
+//Lưu đệm trạng thái M để không phải xuống PLC đọc lại mỗi lần nhấn nút
 let cachedMState = 0;
 const TARGET_D_REGISTERS = [100, 102];
-
 const port = new SerialPort({
     path: PLC_PORT_NAME,
     baudRate: 9600,
     dataBits: 7,
-    parity: 'odd',
+    parity: 'even',
     stopBits: 1,
     autoOpen: false
 });
@@ -55,8 +49,6 @@ function processBuffer() {
     } else if (validIndex === -1) {
         rxBuffer = Buffer.alloc(0); return;
     }
-
-    console.log(`[RX HEX HOÀN CHỈNH]: ${rxBuffer.toString('hex').toUpperCase()}`);
 
     let currentHandler = responseHandler;
     responseHandler = null;
@@ -103,19 +95,16 @@ function sendFrame(frame) {
         };
 
         responseHandler = (data) => { safeResolve(data); };
-        console.log(`[TX HEX]: ${frame.toString('hex').toUpperCase()}`);
 
-        // Đã tăng Watchdog lên 1500ms
         timeoutHandle = setTimeout(() => {
             if (!isResolved) {
-                console.log("⚠️ PLC Timeout không phản hồi (Giải cứu hàng đợi)!");
                 rxBuffer = Buffer.alloc(0);
                 safeResolve(null);
             }
         }, 1500);
 
         port.write(frame, (err) => {
-            if (err) { console.error("❌ Lỗi port.write:", err.message); safeResolve(null); }
+            if (err) { safeResolve(null); }
         });
     });
 }
@@ -126,123 +115,141 @@ function calculateChecksum(payloadStr) {
     return sum.toString(16).slice(-2).toUpperCase();
 }
 
-// ==========================================
-// HÀM BỌC WRAPPER
-// ==========================================
 async function executeWithRetry(frame, validateFunc, retryName) {
     let maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         let res = await sendFrame(frame);
-
         if (validateFunc(res)) return res;
-
-        if (attempt < maxRetries) {
-            console.log(`♻️ Đang xả cáp và thử ${retryName} (Lần ${attempt})...`);
-            await delay(300); // Đã tăng thời gian chờ đường truyền sạch lên 300ms
-        }
+        if (attempt < maxRetries) await delay(300);
     }
     return null;
 }
 
-// ==========================================
-// ĐÓNG GÓI LỆNH THEO CHUẨN DEDICATED (FORM 1)
-// ==========================================
-function buildFrameForm1(cmd, deviceType, deviceNoStr, countStr, dataStr = "") {
-    let station = "00";   // Trạm 00 theo cấu hình
-    let pcNo = "FF";      // Số PC mặc định
-    let waitTime = "0";   // 0ms chờ
-
-    // BẢN VÁ LỖI TIMEOUT: Tự động thêm dấu cách nếu deviceType chỉ có 1 ký tự
-    // Ví dụ: "D" sẽ tự động biến thành "D " để chuẩn xác độ dài 2 byte của Mitsubishi
-    if (deviceType.length === 1) {
-        deviceType = deviceType + " ";
-    }
-
-    // Ghép Payload (Phần lõi để tính Checksum)
-    let payload = station + pcNo + cmd + waitTime + deviceType + deviceNoStr + countStr + dataStr;
+function buildReadFrame(addressHex, countHex) {
+    let payload = '0' + addressHex + countHex + '\x03';
     let checksum = calculateChecksum(payload);
+    return Buffer.from('\x02' + payload + checksum, 'ascii');
+}
 
-    // Gửi đi bắt đầu bằng ENQ (0x05), không dùng CR LF
-    return Buffer.from(ENQ + payload + checksum, 'ascii');
+function buildWriteByteFrame(addressHex, countHex, valueInt) {
+    let hexData = valueInt.toString(16).padStart(2, '0').toUpperCase();
+    let payload = '1' + addressHex + countHex + hexData + '\x03';
+    let checksum = calculateChecksum(payload);
+    return Buffer.from('\x02' + payload + checksum, 'ascii');
 }
 
 function validateResponseChecksum(resBuffer) {
     if (!resBuffer || resBuffer.length < 3) return false;
     let etxIndex = resBuffer.indexOf(0x03);
     if (etxIndex === -1 || resBuffer.length < etxIndex + 3) return false;
-
     let payloadToCheck = resBuffer.toString('ascii', 1, etxIndex + 1);
     let receivedChecksum = resBuffer.toString('ascii', etxIndex + 1, etxIndex + 3);
     return receivedChecksum === calculateChecksum(payloadToCheck);
 }
 
 // ==========================================
-// CÁC HÀM GIAO TIẾP PLC (DEDICATED PROTOCOL)
+// TÍNH NĂNG MỚI 1: BỘ TÍNH TOÁN ĐỊA CHỈ THANH GHI ĐẶC BIỆT
 // ==========================================
+function getDAddress(dNum) {
+    // D8000+ có Base Address là 0x0E00 trong MC Protocol
+    if (dNum >= 8000) return 0x0E00 + (dNum - 8000) * 2;
+    return 0x1000 + (dNum * 2);
+}
 
-async function writeMByte(valueInt) {
-    // Ép giá trị nguyên thành chuỗi Hex 4 ký tự (Word Write - 16 bit)
-    let hexData = valueInt.toString(16).padStart(4, '0').toUpperCase();
+function getMByteAddress(mNum) {
+    // M8000+ có Base Address là 0x01E0 trong MC Protocol
+    if (mNum >= 8000) return 0x01E0 + Math.floor((mNum - 8000) / 8);
+    return 0x0100 + Math.floor(mNum / 8);
+}
 
-    // Gửi lệnh WW (Word Write) vào M0000, số lượng 01 Word
-    let frame = buildFrameForm1("WW", "M", "0000", "01", hexData);
+// ==========================================
+// TÍNH NĂNG MỚI 2: HÀM ĐỌC 32-BIT & ĐỌC M ĐẶC BIỆT
+// ==========================================
+async function readDRegister32(dNumber) {
+    let address = getDAddress(dNumber);
+    let addressHex = address.toString(16).toUpperCase().padStart(4, '0');
+    // Đọc 4 bytes (tương đương 2 thanh ghi 16-bit liền kề)
+    let frame = buildReadFrame(addressHex, '04');
 
     let res = await executeWithRetry(frame, (data) => {
-        if (data && data[0] === 0x15) console.log(`⚠️ PLC NAK (0x15) - Lệnh ghi bị từ chối!`);
-        return (data && data[0] === 0x06); // 0x06 là ACK (Xác nhận ghi thành công)
-    }, "GHI LẠI BATCH");
+        return (data && data[0] === 0x02 && validateResponseChecksum(data));
+    }, `ĐỌC 32-BIT D${dNumber}`);
 
+    if (res) {
+        let hexStr = res.toString('ascii', 1, 9); 
+        
+        // Tách dữ liệu Low Word (D8360)
+        let d1Low = hexStr.substring(0, 2), d1High = hexStr.substring(2, 4);
+        let valLowWord = parseInt(d1High + d1Low, 16);
+        
+        // Tách dữ liệu High Word (D8361)
+        let d2Low = hexStr.substring(4, 6), d2High = hexStr.substring(6, 8);
+        let valHighWord = parseInt(d2High + d2Low, 16);
+
+        // Gộp thành số nguyên 32-bit có dấu (Sử dụng phép dịch bit)
+        let value32 = (valHighWord << 16) | valLowWord;
+        return value32;
+    }
+    return null;
+}
+
+async function readSpecialMBit(mNumber) {
+    let address = getMByteAddress(mNumber);
+    let addressHex = address.toString(16).toUpperCase().padStart(4, '0');
+    let frame = buildReadFrame(addressHex, '01');
+
+    let res = await executeWithRetry(frame, (data) => {
+        return (data && data[0] === 0x02 && validateResponseChecksum(data));
+    }, `ĐỌC M${mNumber}`);
+
+    if (res) {
+        let hexStr = res.toString('ascii', 1, 3);
+        let byteVal = parseInt(hexStr, 16);
+        let bitIndex = mNumber % 8;
+        return (byteVal & (1 << bitIndex)) !== 0 ? 1 : 0;
+    }
+    return null;
+}
+
+async function writeMByte(valueInt) {
+    let frame = buildWriteByteFrame('0100', '01', valueInt);
+    let res = await executeWithRetry(frame, (data) => {
+        return (data && data[0] === 0x06);
+    }, "GHI LẠI BATCH");
     return res !== null;
 }
 
 async function readYState() {
-    // Gửi lệnh WR (Word Read) đọc 1 Word (16 bit) từ Y0000
-    let frame = buildFrameForm1("WR", "Y", "0000", "01");
+    let frame = buildReadFrame('00A0', '01');
     let res = await executeWithRetry(frame, (data) => {
-        return (data && data[0] === 0x02 && validateResponseChecksum(data)); // 0x02 là STX
+        return (data && data[0] === 0x02 && validateResponseChecksum(data));
     }, "ĐỌC LẠI Y");
-
-    if (res) {
-        // Cấu trúc Data trả về: STX(1) + 00FF(4) + DATA(4) + ETX(1) + Checksum(2)
-        // Vị trí DATA nằm từ index 5, dài 4 ký tự
-        let hexStr = res.toString('ascii', 5, 9);
-        let value = parseInt(hexStr, 16);
-        return value & 0xFF; // Chỉ lấy 8 bit thấp (Y0-Y7) để tương thích chuẩn cũ
-    }
-    return -1;
+    return res ? parseInt(res.toString('ascii', 1, 3), 16) : -1;
 }
 
 async function readMState() {
-    // Gửi lệnh WR (Word Read) đọc 1 Word từ M0000
-    let frame = buildFrameForm1("WR", "M", "0000", "01");
+    let frame = buildReadFrame('0100', '01');
     let res = await executeWithRetry(frame, (data) => {
         return (data && data[0] === 0x02 && validateResponseChecksum(data));
     }, "ĐỌC LẠI M");
-
-    if (res) {
-        let hexStr = res.toString('ascii', 5, 9);
-        let value = parseInt(hexStr, 16);
-        return value & 0xFF; // Chỉ lấy 8 bit thấp (M0-M7)
-    }
-    return -1;
+    return res ? parseInt(res.toString('ascii', 1, 3), 16) : -1;
 }
 
 async function readDRegister(dNumber) {
-    let dStr = dNumber.toString().padStart(4, '0');
-    // Đọc thanh ghi D yêu cầu đọc đúng 01 Word (16 bit)
-    let frame = buildFrameForm1("WR", "D", dStr, "01");
+    let address = getDAddress(dNumber);
+    let addressHex = address.toString(16).toUpperCase().padStart(4, '0');
+    let frame = buildReadFrame(addressHex, '02');
 
     let res = await executeWithRetry(frame, (data) => {
         return (data && data[0] === 0x02 && validateResponseChecksum(data));
     }, `ĐỌC THANH GHI D${dNumber}`);
 
     if (res) {
-        let hexStr = res.toString('ascii', 5, 9);
-        let value = parseInt(hexStr, 16); // Form 1 là Big-Endian, ép kiểu trực tiếp!
-
-        // Xử lý số nguyên âm
+        let hexStr = res.toString('ascii', 1, 5);
+        let lowByte = hexStr.substring(0, 2);
+        let highByte = hexStr.substring(2, 4);
+        let value = parseInt(highByte + lowByte, 16);
         if (value >= 0x8000) value = value - 0x10000;
-
         return value;
     }
     return null;
@@ -276,13 +283,12 @@ mqttClient.on('connect', () => {
 
 mqttClient.on('message', (topic, message) => {
     let msg = message.toString().replace(/\0/g, '').trim();
-    console.log(`\n📥 [MQTT ĐÃ NHẬN] Lệnh: ${msg}`);
 
     if (msg === "HEARTBEAT") {
         clearTimeout(heartbeatTimer);
         heartbeatTimer = setTimeout(() => {
             if (port.isOpen) {
-                console.log("🥀 Mất kết nối WebGL (Heartbeat timeout). Đang đóng cổng COM...");
+                console.log("🥀 Mất kết nối WebGL. Đang đóng cổng COM...");
                 port.close();
             }
         }, HEARTBEAT_TIMEOUT);
@@ -294,53 +300,33 @@ mqttClient.on('message', (topic, message) => {
 
     if (msg === "CLEAR_QUEUE") {
         actionQueue = [];
-        console.log("🧹 [DỌN DẸP] Đã xóa sạch hàng đợi lệnh cũ!");
         return;
     }
 
     if (msg === "SYNC_STATE") {
         actionQueue.push(async () => {
             if (!port.isOpen) return;
-            console.log("🔄 [ĐỒNG BỘ] Đang quét trạng thái PLC (M, Y, D) cho WebGL...");
-
             let mVal = await readMState();
-            await delay(50);
+            await delay(30);
             let yVal = await readYState();
-            await delay(50);
+            await delay(30);
 
-            // =====================================
-            // ĐỌC DYNAMIC TẤT CẢ THANH GHI D TRONG MẢNG
-            // =====================================
             let dValues = [];
             for (let dNum of TARGET_D_REGISTERS) {
                 let dVal = await readDRegister(dNum);
-                if (dVal !== null) {
-                    dValues.push(`D${dNum}:${dVal}`); // Đóng gói dạng "D100:3200"
-                }
-                await delay(50); // Trễ 50ms giữa mỗi lần đọc D để chống nghẽn cáp
+                if (dVal !== null) dValues.push(`D${dNum}:${dVal}`);
+                await delay(30); 
             }
 
             if (mVal !== -1 && yVal !== -1) {
-                cachedMState = mVal; // Cập nhật Cache M
-
+                cachedMState = mVal;
                 let payload = [];
-
-                // 1. Bơm trạng thái M
                 for (let i = 0; i <= 7; i++) payload.push(`M${i}_${(mVal & (1 << i)) ? 'ON' : 'OFF'}`);
-
-                // 2. Bơm trạng thái Y
                 for (let i = 0; i <= 7; i++) payload.push(`Y${i}_${(yVal & (1 << i)) ? 'ON' : 'OFF'}`);
-
-                // 3. Bơm toàn bộ dữ liệu D vừa đọc được
-                if (dValues.length > 0) {
-                    payload.push(...dValues);
-                }
-
+                if (dValues.length > 0) payload.push(...dValues);
                 payload.push('SYNC_DONE');
 
-                // Bắn tất cả lên Unity
                 mqttClient.publish('iot/lab602/dieu_khien_plc/status', payload.join(','));
-                console.log(`📤 [ĐỒNG BỘ HOÀN TẤT] Gửi về Unity: [${payload.join(',')}]`);
             }
         });
         processActionQueue();
@@ -349,52 +335,33 @@ mqttClient.on('message', (topic, message) => {
 
     if (msg.includes('_ON') || msg.includes('_OFF')) {
         actionQueue.push(async () => {
-            if (!port.isOpen) {
-                mqttClient.publish('iot/lab602/dieu_khien_plc/status', 'ACTION_FAILED');
-                return;
-            }
-
+            if (!port.isOpen) return;
             let commands = msg.split(',');
             let payload = [];
             let hasError = false;
-
-            // DÙNG BIẾN CACHE: Không cần hỏi lại phần cứng M đang là bao nhiêu nữa!
             let newMVal = cachedMState;
 
             for (let cmd of commands) {
                 let cleanCmd = cmd.trim();
                 if (!cleanCmd) continue;
-
                 let [mName, state] = cleanCmd.split('_');
                 let mNumber = parseInt(mName.replace('M', ''));
-
                 if (mNumber >= 0 && mNumber <= 7) {
                     if (state === "ON") newMVal |= (1 << mNumber);
                     else newMVal &= ~(1 << mNumber);
                 }
             }
 
-            // Ghi trạng thái M mới xuống
             if (newMVal !== cachedMState) {
-                console.log(`⚙️ [XỬ LÝ BATCH] Ghi Cụm M Hex [${newMVal.toString(16).toUpperCase().padStart(2, '0')}]`);
                 let success = await writeMByte(newMVal);
-                if (!success) {
-                    hasError = true;
-                } else {
-                    cachedMState = newMVal; // Ghi thành công thì cập nhật lại Cache
-                }
+                if (!success) hasError = true;
+                else cachedMState = newMVal;
                 await delay(30);
-            } else {
-                console.log("⏩ Trạng thái M không đổi, bỏ qua bước ghi.");
-                await delay(20);
             }
 
-            // Chỉ cần Đọc Y để lấy output
             let yVal = await readYState();
-
             if (yVal === -1 || hasError) {
                 payload.push('ACTION_FAILED');
-                console.log("⚠️ Cảnh báo: Lỗi kết nối phần cứng. Đánh rớt lệnh!");
             } else {
                 for (let cmd of commands) {
                     let cleanCmd = cmd.trim();
@@ -412,15 +379,36 @@ mqttClient.on('message', (topic, message) => {
                 }
                 payload.push('ACTION_DONE');
             }
-
-            let finalMessage = payload.join(',');
-            mqttClient.publish('iot/lab602/dieu_khien_plc/status', finalMessage);
-            console.log(`📤 [HOÀN TẤT] Trạng thái gửi về Unity: [${finalMessage}]`);
+            mqttClient.publish('iot/lab602/dieu_khien_plc/status', payload.join(','));
         });
-
         processActionQueue();
     }
 });
+
+// ==========================================
+// TÍNH NĂNG MỚI 3: TELEMETRY LOOP (VÒNG LẶP ĐO LƯỜNG TỰ ĐỘNG)
+// ==========================================
+setInterval(() => {
+    // Chỉ đẩy lệnh đo lường vào hàng đợi khi cổng COM đã mở và hàng đợi không bị nghẽn
+    if (!port.isOpen || actionQueue.length > 3) return; 
+
+    actionQueue.push(async () => {
+        // Đọc tổng số xung 32-bit từ D8360 và D8361
+        let d8360Val = await readDRegister32(8360);
+        await delay(20);
+        
+        // Đọc cờ trạng thái bận từ M8360
+        let m8360Val = await readSpecialMBit(8360);
+        
+        // Bắn dữ liệu telemetry về Unity qua MQTT
+        if (d8360Val !== null && m8360Val !== null) {
+            mqttClient.publish('iot/lab602/dieu_khien_plc/status', `D8360:${d8360Val},M8360:${m8360Val}`);
+        }
+    });
+    
+    // Kích hoạt xử lý hàng đợi
+    processActionQueue();
+}, 250); // Tần số đo lường: 250ms/lần (Tránh spam nghẽn cáp Serial)
 
 app.get("/health", (req, res) => {
     res.json({ service: "PLC Gateway", status: "running", mqtt: mqttClient.connected, com: port.isOpen });
