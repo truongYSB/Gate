@@ -6,7 +6,7 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const BROKER_URL = 'ws://localhost:9001';
 const mqttClient = mqtt.connect(BROKER_URL);
-const PLC_PORT_NAME = 'COM6';
+const PLC_PORT_NAME = 'COM4';
 
 //Lưu đệm trạng thái M để không phải xuống PLC đọc lại mỗi lần nhấn nút
 let cachedMState = 0;
@@ -420,18 +420,16 @@ app.listen(5003, () => { console.log("🚀 Gateway HTTP API đang chạy ở c�
 // ĐỌC LIÊN TỤC THANH GHI XUNG (DEBUG)
 // ==========================================
 function startContinuousPolling() {
-    console.log("⏱️ Đã kích hoạt chế độ tự động đọc xung Y1, Y2 mỗi 1 giây...");
+    console.log("⏱️ Đã kích hoạt chế độ tự động đọc xung Y1 liên tục...");
     
     setInterval(() => {
         actionQueue.push(async () => {
             if (!port.isOpen) return;
             
-            // ĐÃ SỬA THÀNH D8350 (Y1) VÀ D8360 (Y2) THEO TÀI LIỆU FX3U
-            let y1Pulse = await readDRegister(8350); 
-            await delay(50);
-            let y2Pulse = await readDRegister(8360); 
+            // Quay lại sử dụng D8142 cho Y1
+            let y1Pulse = await readDRegister(8142); 
             
-            console.log(`\n📊 [MONITOR LIÊN TỤC] Tổng xung Y1 (D8350): ${y1Pulse} | Tổng xung Y2 (D8360): ${y2Pulse}`);
+            console.log(`\n📊 [MONITOR LIÊN TỤC] Vị trí hiện tại của Y1 (D8142): ${y1Pulse}`);
         });
         
         processActionQueue();
