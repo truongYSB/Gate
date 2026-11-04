@@ -6,7 +6,7 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const BROKER_URL = 'ws://localhost:9001';
 const mqttClient = mqtt.connect(BROKER_URL);
-const PLC_PORT_NAME = 'COM6';
+const PLC_PORT_NAME = 'COM4';
 
 //Lưu đệm trạng thái M để không phải xuống PLC đọc lại mỗi lần nhấn nút
 let cachedMState = 0;

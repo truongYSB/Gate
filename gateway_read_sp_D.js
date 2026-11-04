@@ -30,6 +30,7 @@ const HEARTBEAT_TIMEOUT = 5000;
 port.on('open', () => {
     console.log(`✅ Đã mở và chiếm dụng cổng ${PLC_PORT_NAME}`);
     mqttClient.publish('iot/lab602/dieu_khien_plc/status', 'GATEWAY_READY');
+    startContinuousPolling();
 });
 
 port.on('close', () => console.log(`🔒 Đã nhả cổng ${PLC_PORT_NAME}`));
@@ -414,6 +415,28 @@ app.get("/health", (req, res) => {
 });
 
 app.listen(5003, () => { console.log("🚀 Gateway HTTP API đang chạy ở cổng 5003"); });
+
+// ==========================================
+// ĐỌC LIÊN TỤC THANH GHI XUNG (DEBUG)
+// ==========================================
+function startContinuousPolling() {
+    console.log("⏱️ Đã kích hoạt chế độ tự động đọc xung Y1, Y2 mỗi 1 giây...");
+    
+    setInterval(() => {
+        actionQueue.push(async () => {
+            if (!port.isOpen) return;
+            
+            // ĐÃ SỬA THÀNH D8350 (Y1) VÀ D8360 (Y2) THEO TÀI LIỆU FX3U
+            let y1Pulse = await readDRegister(8350); 
+            await delay(50);
+            let y2Pulse = await readDRegister(8360); 
+            
+            console.log(`\n📊 [MONITOR LIÊN TỤC] Tổng xung Y1 (D8350): ${y1Pulse} | Tổng xung Y2 (D8360): ${y2Pulse}`);
+        });
+        
+        processActionQueue();
+    }, 1000); 
+}
 
 function gracefulShutdown() {
     console.log("\n🛑 Đang tắt Gateway và giải phóng tài nguyên...");
