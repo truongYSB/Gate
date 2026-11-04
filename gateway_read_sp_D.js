@@ -202,16 +202,30 @@ async function readMState() {
 
 // HÀM MỚI: Đọc riêng biệt trạng thái của M100
 async function readM100State() {
-    // M100 nằm ở địa chỉ 010C (chứa M96 đến M103), tại bit số 4
     let frame = buildReadFrame('010C', '01');
+
+    console.log('[M100] TX:', frame.toString('hex').toUpperCase());
+
     let res = await executeWithRetry(frame, (data) => {
-        return (data && data[0] === 0x02 && validateResponseChecksum(data));
+        console.log(
+            '[M100] RX:',
+            data ? data.toString('hex').toUpperCase() : 'NULL'
+        );
+
+        return (
+            data &&
+            data[0] === 0x02 &&
+            validateResponseChecksum(data)
+        );
     }, "ĐỌC M100");
 
     if (res) {
         let byteVal = parseInt(res.toString('ascii', 1, 3), 16);
-        return (byteVal & (1 << 4)) !== 0; // Trả về true (ON) hoặc false (OFF)
+        console.log('[M100] VALUE:', byteVal);
+
+        return (byteVal & (1 << 4)) !== 0;
     }
+
     return null;
 }
 
