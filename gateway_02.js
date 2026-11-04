@@ -6,7 +6,7 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const BROKER_URL = 'ws://localhost:9001';
 const mqttClient = mqtt.connect(BROKER_URL);
-const PLC_PORT_NAME = 'COM8';
+const PLC_PORT_NAME = 'COM6';
 
 //Lưu đệm trạng thái M để không phải xuống PLC đọc lại mỗi lần nhấn nút
 let cachedMState = 0;
@@ -176,12 +176,12 @@ async function readDRegister32(dNumber) {
     }, `ĐỌC 32-BIT D${dNumber}`);
 
     if (res) {
-        let hexStr = res.toString('ascii', 1, 9); 
-        
+        let hexStr = res.toString('ascii', 1, 9);
+
         // Tách dữ liệu Low Word (D8360)
         let d1Low = hexStr.substring(0, 2), d1High = hexStr.substring(2, 4);
         let valLowWord = parseInt(d1High + d1Low, 16);
-        
+
         // Tách dữ liệu High Word (D8361)
         let d2Low = hexStr.substring(4, 6), d2High = hexStr.substring(6, 8);
         let valHighWord = parseInt(d2High + d2Low, 16);
@@ -315,7 +315,7 @@ mqttClient.on('message', (topic, message) => {
             for (let dNum of TARGET_D_REGISTERS) {
                 let dVal = await readDRegister(dNum);
                 if (dVal !== null) dValues.push(`D${dNum}:${dVal}`);
-                await delay(30); 
+                await delay(30);
             }
 
             if (mVal !== -1 && yVal !== -1) {
@@ -389,24 +389,22 @@ mqttClient.on('message', (topic, message) => {
 // TÍNH NĂNG MỚI 3: TELEMETRY LOOP (VÒNG LẶP ĐO LƯỜNG TỰ ĐỘNG)
 // ==========================================
 setInterval(() => {
-    // Chỉ đẩy lệnh đo lường vào hàng đợi khi cổng COM đã mở và hàng đợi không bị nghẽn
-    if (!port.isOpen || actionQueue.length > 3) return; 
+    if (!port.isOpen || actionQueue.length > 3) return;
 
     actionQueue.push(async () => {
-        // Đọc tổng số xung 32-bit từ D8360 và D8361
-        let d8360Val = await readDRegister32(8360);
+        // ĐỔI THÀNH 8350 CHO CHÂN Y001
+        let d8350Val = await readDRegister32(8350);
         await delay(20);
-        
-        // Đọc cờ trạng thái bận từ M8360
-        let m8360Val = await readSpecialMBit(8360);
-        
-        // Bắn dữ liệu telemetry về Unity qua MQTT
-        if (d8360Val !== null && m8360Val !== null) {
-            mqttClient.publish('iot/lab602/dieu_khien_plc/status', `D8360:${d8360Val},M8360:${m8360Val}`);
+
+        // ĐỔI THÀNH 8350 CHO CHÂN Y001
+        let m8350Val = await readSpecialMBit(8350);
+
+        // Cập nhật chuỗi MQTT bắn về Unity
+        if (d8350Val !== null && m8350Val !== null) {
+            mqttClient.publish('iot/lab602/dieu_khien_plc/status', `D8350:${d8350Val},M8350:${m8350Val}`);
         }
     });
-    
-    // Kích hoạt xử lý hàng đợi
+
     processActionQueue();
 }, 250); // Tần số đo lường: 250ms/lần (Tránh spam nghẽn cáp Serial)
 
