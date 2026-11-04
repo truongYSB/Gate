@@ -236,6 +236,25 @@ async function readDRegister(dNumber) {
     return null;
 }
 
+async function readDRegister32(dNumber) {
+    let lowVal = await readDRegister(dNumber);
+    let highVal = await readDRegister(dNumber + 1);
+
+    if (lowVal !== null && highVal !== null) {
+        // Chuyển đổi lại thành số không dấu 16-bit để gộp
+        let uLow = lowVal < 0 ? lowVal + 0x10000 : lowVal;
+        let uHigh = highVal < 0 ? highVal + 0x10000 : highVal;
+        
+        // Xử lý bù 2 cho số 32-bit
+        let value32 = (uHigh * 65536) + uLow;
+        if (value32 >= 0x80000000) {
+            value32 = value32 - 0x100000000;
+        }
+        return value32;
+    }
+    return null;
+}
+
 // ==========================================
 // HỆ THỐNG QUEUE & MQTT
 // ==========================================
@@ -420,18 +439,18 @@ app.listen(5003, () => { console.log("🚀 Gateway HTTP API đang chạy ở c�
 // ĐỌC LIÊN TỤC THANH GHI XUNG (DEBUG)
 // ==========================================
 function startContinuousPolling() {
-    console.log("⏱️ Đã kích hoạt chế độ tự động đọc xung Y1, Y2 (thông qua D110, D112)...");
+    console.log("⏱️ Đã kích hoạt chế độ tự động đọc xung 32-bit Y1, Y2 (D110, D112)...");
     
     setInterval(() => {
         actionQueue.push(async () => {
             if (!port.isOpen) return;
             
-            // Đọc D110 (chứa số xung Y1) và D112 (chứa số xung Y2)
-            let y1Pulse = await readDRegister(110); 
+            // Sử dụng hàm 32-bit mới
+            let y1Pulse = await readDRegister32(110); 
             await delay(50);
-            let y2Pulse = await readDRegister(112); 
+            let y2Pulse = await readDRegister32(112); 
             
-            console.log(`\n📊 [MONITOR LIÊN TỤC] Vị trí Y1 (D110): ${y1Pulse} | Vị trí Y2 (D112): ${y2Pulse}`);
+            console.log(`\n📊 [MONITOR LIÊN TỤC] Vị trí Y1 (D110-D111): ${y1Pulse} | Vị trí Y2 (D112-D113): ${y2Pulse}`);
         });
         
         processActionQueue();
