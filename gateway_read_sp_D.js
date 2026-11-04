@@ -420,16 +420,18 @@ app.listen(5003, () => { console.log("🚀 Gateway HTTP API đang chạy ở c�
 // ĐỌC LIÊN TỤC THANH GHI XUNG (DEBUG)
 // ==========================================
 function startContinuousPolling() {
-    console.log("⏱️ Đã kích hoạt chế độ tự động đọc xung Y1 liên tục...");
+    console.log("⏱️ Đã kích hoạt chế độ tự động đọc xung Y1, Y2 (thông qua D110, D112)...");
     
     setInterval(() => {
         actionQueue.push(async () => {
             if (!port.isOpen) return;
             
-            // Quay lại sử dụng D8142 cho Y1
-            let y1Pulse = await readDRegister(8142); 
+            // Đọc D110 (chứa số xung Y1) và D112 (chứa số xung Y2)
+            let y1Pulse = await readDRegister(110); 
+            await delay(50);
+            let y2Pulse = await readDRegister(112); 
             
-            console.log(`\n📊 [MONITOR LIÊN TỤC] Vị trí hiện tại của Y1 (D8142): ${y1Pulse}`);
+            console.log(`\n📊 [MONITOR LIÊN TỤC] Vị trí Y1 (D110): ${y1Pulse} | Vị trí Y2 (D112): ${y2Pulse}`);
         });
         
         processActionQueue();
