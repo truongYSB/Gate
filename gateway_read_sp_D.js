@@ -19,7 +19,7 @@ const port = new SerialPort({
     dataBits: 7,
     parity: 'even',
     stopBits: 1,
-    autoOpen: true 
+    autoOpen: true
 });
 
 const app = express();
@@ -97,7 +97,7 @@ function sendFrame(frame) {
         };
 
         responseHandler = (data) => { safeResolve(data); };
-        
+
         timeoutHandle = setTimeout(() => {
             if (!isResolved) {
                 console.log("⚠️ PLC Timeout không phản hồi (Giải cứu hàng đợi)!");
@@ -126,7 +126,7 @@ async function executeWithRetry(frame, validateFunc, retryName) {
 
         if (attempt < maxRetries) {
             console.log(`♻️ Đang xả cáp và thử ${retryName} (Lần ${attempt})...`);
-            await delay(300); 
+            await delay(300);
         }
     }
     return null;
@@ -153,7 +153,7 @@ async function writeDRegister(dNumber, value) {
     let hexValue = value.toString(16).toUpperCase().padStart(4, '0');
     let highByte = hexValue.substring(0, 2);
     let lowByte = hexValue.substring(2, 4);
-    let payloadData = lowByte + highByte; 
+    let payloadData = lowByte + highByte;
 
     let payload = '1' + addressHex + '02' + payloadData + '\x03';
     let checksum = calculateChecksum(payload);
@@ -258,15 +258,15 @@ mqttClient.on('connect', () => {
 
 mqttClient.on('message', (topic, message) => {
     let msg = message.toString().replace(/\0/g, '').trim();
-    if(msg !== "SYNC_STATE") console.log(`\n📥 [MQTT IN]: ${msg}`);
+    if (msg !== "SYNC_STATE") console.log(`\n📥 [MQTT IN]: ${msg}`);
 
     // [THÊM MỚI]: Bắt sự kiện Khởi tạo hoặc Đóng Tab (Báo Tử)
     if (msg === "INIT_PLC" || msg === "WEBGL_CLOSED") {
         actionQueue.push(async () => {
             if (!port.isOpen) return;
             console.log(`🚨 [COLD START / SHUTDOWN] Nhận lệnh ${msg}. Ép xả trạng thái...`);
-            await writeMByte(0); 
-            await writeDRegister(100, 0); 
+            await writeMByte(0);
+            await writeDRegister(100, 0);
             await writeDRegister(102, 0);
             cachedMState = 0;
             mqttClient.publish('iot/lab602/dieu_khien_plc/status', 'INIT_DONE');
@@ -285,8 +285,8 @@ mqttClient.on('message', (topic, message) => {
     if (msg.startsWith("SET_PARAM")) {
         let parts = msg.split(',');
         if (parts.length === 3) {
-            let tPulse = parseInt(parts[1]); 
-            let tFreq = parseInt(parts[2]);  
+            let tPulse = parseInt(parts[1]);
+            let tFreq = parseInt(parts[2]);
             actionQueue.push(async () => {
                 if (!port.isOpen) return;
                 await writeDRegister(100, tPulse);
@@ -313,11 +313,11 @@ mqttClient.on('message', (topic, message) => {
             for (let dNum of TARGET_D_REGISTERS) {
                 let dVal = await readDRegister(dNum);
                 if (dVal !== null) dValues.push(`D${dNum}:${dVal}`);
-                await delay(50); 
+                await delay(50);
             }
 
             if (mVal !== -1 && yVal !== -1) {
-                cachedMState = mVal; 
+                cachedMState = mVal;
                 cachedM100State = m100Val;
                 let payload = [];
                 for (let i = 0; i <= 7; i++) payload.push(`M${i}_${(mVal & (1 << i)) ? 'ON' : 'OFF'}`);
@@ -360,7 +360,7 @@ mqttClient.on('message', (topic, message) => {
             if (newMVal !== cachedMState) {
                 let success = await writeMByte(newMVal);
                 if (!success) hasError = true;
-                else cachedMState = newMVal; 
+                else cachedMState = newMVal;
                 await delay(30);
             } else {
                 await delay(20);
@@ -401,26 +401,43 @@ app.get("/health", (req, res) => {
 app.listen(5003, () => { console.log("🚀 Gateway HTTP API đang chạy ở cổng 5003"); });
 
 // ==========================================
-// HỆ THỐNG GIÁM SÁT CỜ M100 (AUTO-POLLING)
+// HỆ THỐNG GIÁM SÁT CỜ M100 (AUTO-POLLING TỐI ƯU)
 // ==========================================
-setInterval(() => {
+let isPollingM100 = false; // Cờ kiểm soát vòng lặp
+
+async function pollM100() {
+    // Nếu hệ thống đang bận xử lý các lệnh từ người dùng (như nhấn nút, Sync), tạm thời bỏ qua nhịp đọc này.
+    if (isProcessing) {
+        setTimeout(pollM100, 300);
+        return;
+    }
+
+    isPollingM100 = true;
+
+    // Đẩy lệnh đọc M100 vào Queue, nhưng với cơ chế kiểm soát
     actionQueue.push(async () => {
         if (!port.isOpen) return;
 
         let m100On = await readM100State();
-        
-        // Bắt khoảnh khắc M100 thay đổi (Tự động ON do chạy, hoặc tự động OFF do dừng)
+
         if (m100On !== null && m100On !== cachedM100State) {
-            cachedM100State = m100On; 
+            cachedM100State = m100On;
             let stateStr = m100On ? 'ON' : 'OFF';
-            
+
             mqttClient.publish('iot/lab602/dieu_khien_plc/status', `M100_${stateStr}`);
             console.log(`\n🔄 [AUTO UPDATE] Trạng thái Motor: M100_${stateStr}`);
         }
     });
-    
-    processActionQueue();
-}, 300);
+
+    await processActionQueue(); // Đợi hàm xử lý Queue hoàn thành trước khi đi tiếp
+    isPollingM100 = false;
+
+    // Chỉ kích hoạt lần đọc tiếp theo sau khi lần này ĐÃ KẾT THÚC (cộng thêm 300ms nghỉ)
+    setTimeout(pollM100, 300);
+}
+
+// Khởi động vòng lặp giám sát
+pollM100();
 
 function gracefulShutdown() {
     console.log("\n🛑 Đang tắt Gateway và giải phóng tài nguyên...");
