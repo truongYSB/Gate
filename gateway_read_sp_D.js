@@ -277,6 +277,10 @@ mqttClient.on('connect', () => {
 
 mqttClient.on('message', (topic, message) => {
     let msg = message.toString().replace(/\0/g, '').trim();
+    
+    // 1. DỌN SẠCH LOG RÁC: Bỏ qua HEARTBEAT và các lệnh MODE để không làm kẹt hàng đợi
+    if (msg === "HEARTBEAT" || msg === "MODE_MOTOR" || msg === "MODE_BASIC") return;
+    
     if (msg !== "SYNC_STATE") console.log(`\n📥 [MQTT IN]: ${msg}`);
 
     if (msg === "INIT_PLC" || msg === "WEBGL_CLOSED") {
@@ -313,7 +317,7 @@ mqttClient.on('message', (topic, message) => {
                 if (!port.isOpen) return;
                 await writeDRegister(100, tPulse);
                 await writeDRegister(102, tFreq);
-                cachedD[100] = tPulse; // CẬP NHẬT CACHE
+                cachedD[100] = tPulse; 
                 cachedD[102] = tFreq;
                 mqttClient.publish('iot/lab602/dieu_khien_plc/status', 'PARAM_SET_DONE');
             });
@@ -337,7 +341,7 @@ mqttClient.on('message', (topic, message) => {
             for (let dNum of TARGET_D_REGISTERS) {
                 let dVal = await readDRegister(dNum);
                 if (dVal !== null) {
-                    cachedD[dNum] = dVal; // LƯU VÀO CACHE
+                    cachedD[dNum] = dVal; 
                     dValues.push(`D${dNum}:${dVal}`);
                 }
                 await delay(50);
@@ -346,7 +350,7 @@ mqttClient.on('message', (topic, message) => {
             if (mVal !== -1 && yVal !== -1) {
                 cachedMState = mVal;
                 cachedM100State = Boolean(m100Val);
-                shouldPollM100 = cachedM100State; // Nếu lúc mới vào mà motor đang chạy thì mới quét
+                shouldPollM100 = cachedM100State; 
 
                 let payload = [];
                 for (let i = 0; i <= 7; i++) payload.push(`M${i}_${(mVal & (1 << i)) ? 'ON' : 'OFF'}`);
@@ -363,8 +367,7 @@ mqttClient.on('message', (topic, message) => {
     }
 
     if (msg.includes('_ON') || msg.includes('_OFF')) {
-        // ƯU TIÊN CAO NHẤT: Nếu người dùng bấm nút M_ON / M_OFF, xóa bớt các lệnh đọc M100 tự động đang xếp hàng
-        // để lệnh bấm nút được thực thi NGAY LẬP TỨC!
+        // Dọn bớt các tác vụ quét M100 tự động để ưu tiên xử lý nút bấm ngay tức khắc
         actionQueue = actionQueue.filter(fn => !fn.isAutoPoll);
 
         actionQueue.push(async () => {
@@ -389,9 +392,7 @@ mqttClient.on('message', (topic, message) => {
                     if (state === "ON") newMVal |= (1 << mNumber);
                     else newMVal &= ~(1 << mNumber);
 
-                    if (mNumber === 1 || mNumber === 2) {
-                        touchedMotorSwitch = true;
-                    }
+                    if (mNumber === 1 || mNumber === 2) touchedMotorSwitch = true;
                 }
             }
 
@@ -399,7 +400,6 @@ mqttClient.on('message', (topic, message) => {
                 let success = await writeMByte(newMVal);
                 if (!success) hasError = true;
                 else cachedMState = newMVal;
-                // Nếu vừa kích hoạt/tắt motor, chờ 80ms để PLC thực thi lệnh MOV & DRVI xong trong vòng quét
                 await delay(touchedMotorSwitch ? 80 : 40);
             } else {
                 await delay(30);
@@ -425,27 +425,30 @@ mqttClient.on('message', (topic, message) => {
                     payload.push(`Y${i}_${isON ? 'ON' : 'OFF'}`);
                 }
 
-                // NẾU CÓ TÁC ĐỘNG VÀO M1 HOẶC M2: Kiểm tra ngay M100 và D100/D102
+                // 2. GIẢI PHÁP MÔ PHỎNG (PREDICTIVE): KHÔNG HỎI PLC ĐỂ TRÁNH TIMEOUT!
                 if (touchedMotorSwitch) {
-                    await delay(60);
-                    let m100On = await readM100State();
-                    if (m100On !== null) {
-                        cachedM100State = m100On;
-                        payload.push(`M100_${m100On ? 'ON' : 'OFF'}`);
+                    let isM1_ON = (cachedMState & (1 << 1)) !== 0;
+                    let isM2_ON = (cachedMState & (1 << 2)) !== 0;
 
-                        if (m100On) {
-                            // Nếu Motor bắt đầu quay -> Đọc D100, D102 gửi về Unity để xoay đúng chiều/tốc độ
-                            // và BẬT cờ shouldPollM100 để canh lúc nào motor dừng!
-                            shouldPollM100 = true;
-                            for (let dNum of TARGET_D_REGISTERS) {
-                                await delay(50);
-                                let dVal = await readDRegister(dNum);
-                                if (dVal !== null) payload.push(`D${dNum}:${dVal}`);
-                            }
-                        } else {
-                            // Nếu tắt M1_OFF làm motor dừng ngay -> Tắt luôn việc quét M100!
-                            shouldPollM100 = false;
-                        }
+                    if (isM1_ON || isM2_ON) {
+                        // KHI BẬT: Báo Unity quay ngay lập tức, không thèm hỏi PLC
+                        cachedM100State = true;
+                        shouldPollM100 = true; // Bật cờ cho pollM100 thức dậy canh chừng lúc dừng
+
+                        let pulses = Math.abs(cachedD[100]) > 0 ? Math.abs(cachedD[100]) : 3200;
+                        let freq = Math.abs(cachedD[102]) > 0 ? Math.abs(cachedD[102]) : 1600;
+                        let signedPulses = isM2_ON ? -pulses : pulses;
+
+                        payload.push('M100_ON');
+                        payload.push(`D100:${signedPulses}`);
+                        payload.push(`D102:${freq}`);
+                        console.log(`🚀 [MOTOR START] Báo Unity quay ngay lập tức (D100:${signedPulses}).`);
+                    } else {
+                        // KHI TẮT: Báo Unity dừng ngay lập tức và dập tắt vòng lặp quét
+                        cachedM100State = false;
+                        shouldPollM100 = false;
+                        payload.push('M100_OFF');
+                        console.log(`🛑 [MOTOR STOP] Gạt tắt. Báo Unity dừng ngay.`);
                     }
                 }
 
@@ -468,47 +471,35 @@ app.listen(5003, () => { console.log("🚀 Gateway HTTP API đang chạy ở c�
 // HỆ THỐNG GIÁM SÁT CỜ M100 THÔNG MINH (CHỈ QUÉT KHI MOTOR ĐANG CHẠY)
 // ==========================================
 async function pollM100() {
-    if (isProcessing) {
-        setTimeout(pollM100, 300);
+    // 3. NẾU KHÔNG CẦN THIẾT -> NGỦ ĐÔNG! (Khắc phục dứt điểm lỗi Timeout khi rảnh rỗi)
+    if (!shouldPollM100 || isProcessing) {
+        setTimeout(pollM100, 500);
         return;
     }
 
-    isPollingM100 = true;
-    actionQueue.push(async () => {
-        if (!port.isOpen) return;
+    let pollTask = async () => {
+        if (!port.isOpen || !shouldPollM100) return;
 
         let m100On = await readM100State();
 
         if (m100On !== null && m100On !== cachedM100State) {
             cachedM100State = m100On;
-
-            if (m100On) {
-                // Xác định chiều quay dựa vào M1 và M2 đang ON hay OFF
-                let isM2_ON = (cachedMState & (1 << 2)) !== 0;
-                let pulses = cachedD[100] || 3200;
-                let freq = cachedD[102] || 1600;
-
-                // M2 ON thì quay ngược (xung âm)
-                let signedPulses = isM2_ON ? -Math.abs(pulses) : Math.abs(pulses);
-
-                // Bơm trực tiếp D100 và D102 vào bản tin M100_ON
-                let payloadStr = `M100_ON,D100:${signedPulses},D102:${freq}`;
-                mqttClient.publish('iot/lab602/dieu_khien_plc/status', payloadStr);
-                console.log(`\n🔄 [AUTO UPDATE] Trạng thái Motor: ${payloadStr}`);
-            } else {
+            
+            if (!m100On) {
+                shouldPollM100 = false;
                 mqttClient.publish('iot/lab602/dieu_khien_plc/status', `M100_OFF`);
-                console.log(`\n🔄 [AUTO UPDATE] Trạng thái Motor: M100_OFF`);
+                console.log(`\n🛑 [AUTO POLL] Motor đã băm xung xong. Tắt quét M100 để giải phóng cáp.`);
             }
         }
-    });
+    };
+    pollTask.isAutoPoll = true;
+    actionQueue.push(pollTask);
 
     await processActionQueue();
-    isPollingM100 = false;
-
-    // Giãn khoảng cách hỏi PLC ra 800ms để chống Timeout khi DRVI đang chạy
+    
+    // Cứ 800ms mới hỏi 1 lần để nhường đường cho DRVI băm xung (có rớt gói tin cũng không sao)
     setTimeout(pollM100, 800);
 }
-
 pollM100();
 
 function gracefulShutdown() {
