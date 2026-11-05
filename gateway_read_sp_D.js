@@ -354,9 +354,9 @@ mqttClient.on('message', (topic, message) => {
 
                 let payload = [];
                 for (let i = 0; i <= 7; i++) payload.push(`M${i}_${(mVal & (1 << i)) ? 'ON' : 'OFF'}`);
+                if (dValues.length > 0) payload.push(...dValues);
                 payload.push(`M100_${cachedM100State ? 'ON' : 'OFF'}`);
                 for (let i = 0; i <= 7; i++) payload.push(`Y${i}_${(yVal & (1 << i)) ? 'ON' : 'OFF'}`);
-                if (dValues.length > 0) payload.push(...dValues);
                 payload.push('SYNC_DONE');
 
                 mqttClient.publish('iot/lab602/dieu_khien_plc/status', payload.join(','));
@@ -438,10 +438,10 @@ mqttClient.on('message', (topic, message) => {
                         let pulses = Math.abs(cachedD[100]) > 0 ? Math.abs(cachedD[100]) : 3200;
                         let freq = Math.abs(cachedD[102]) > 0 ? Math.abs(cachedD[102]) : 1600;
                         let signedPulses = isM2_ON ? -pulses : pulses;
-
-                        payload.push('M100_ON');
+                        
                         payload.push(`D100:${signedPulses}`);
                         payload.push(`D102:${freq}`);
+                        payload.push('M100_ON');
                         console.log(`🚀 [MOTOR START] Báo Unity quay ngay lập tức (D100:${signedPulses}).`);
                     } else {
                         // KHI TẮT: Báo Unity dừng ngay lập tức và dập tắt vòng lặp quét
