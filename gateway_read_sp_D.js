@@ -28,7 +28,7 @@ const app = express();
 let responseHandler = null;
 let timeoutHandle = null;
 let rxBuffer = Buffer.alloc(0);
-let expectedType = null; 
+let expectedType = null;
 
 port.on('open', () => {
     console.log(`✅ Đã mở và chiếm dụng vĩnh viễn cổng ${PLC_PORT_NAME}`);
@@ -120,7 +120,7 @@ function calculateChecksum(payloadStr) {
 }
 
 async function executeWithRetry(frame, type, validateFunc, retryName, quiet = false) {
-    let maxRetries = quiet ? 1 : 3; 
+    let maxRetries = quiet ? 1 : 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         let res = await sendFrame(frame, type, quiet);
         if (validateFunc(res)) return res;
@@ -204,7 +204,7 @@ async function readM100State(quiet = false) {
     let frame = buildReadFrame('010C', '01');
     let res = await executeWithRetry(frame, 'DATA', (data) => {
         return (data && data[0] === 0x02 && validateResponseChecksum(data));
-    }, "ĐỌC M100", quiet); 
+    }, "ĐỌC M100", quiet);
 
     if (res) {
         let byteVal = parseInt(res.toString('ascii', 1, 3), 16);
@@ -244,7 +244,7 @@ async function processActionQueue() {
         let action = actionQueue.shift();
         try {
             await action();
-            await delay(80); 
+            await delay(80);
         } catch (e) {
             console.error("❌ Lỗi Queue:", e);
         }
@@ -259,7 +259,7 @@ mqttClient.on('connect', () => {
 
 mqttClient.on('message', (topic, message) => {
     let msg = message.toString().replace(/\0/g, '').trim();
-    
+
     if (msg === "HEARTBEAT" || msg === "MODE_MOTOR" || msg === "MODE_BASIC") return;
     if (msg !== "SYNC_STATE") console.log(`\n📥 [MQTT IN]: ${msg}`);
 
@@ -295,7 +295,7 @@ mqttClient.on('message', (topic, message) => {
                 if (!port.isOpen) return;
                 await writeDRegister(100, tPulse);
                 await writeDRegister(102, tFreq);
-                cachedD[100] = tPulse; 
+                cachedD[100] = tPulse;
                 cachedD[102] = tFreq;
                 mqttClient.publish('iot/lab602/dieu_khien_plc/status', 'PARAM_SET_DONE');
             });
@@ -319,7 +319,7 @@ mqttClient.on('message', (topic, message) => {
             for (let dNum of TARGET_D_REGISTERS) {
                 let dVal = await readDRegister(dNum);
                 if (dVal !== null) {
-                    cachedD[dNum] = dVal; 
+                    cachedD[dNum] = dVal;
                     dValues.push(`D${dNum}:${dVal}`);
                 }
                 await delay(50);
@@ -328,7 +328,7 @@ mqttClient.on('message', (topic, message) => {
             if (mVal !== -1 && yVal !== -1) {
                 cachedMState = mVal;
                 cachedM100State = Boolean(m100Val);
-                shouldPollM100 = cachedM100State; 
+                shouldPollM100 = cachedM100State;
 
                 let payload = [];
                 for (let i = 0; i <= 7; i++) payload.push(`M${i}_${(mVal & (1 << i)) ? 'ON' : 'OFF'}`);
@@ -396,7 +396,7 @@ mqttClient.on('message', (topic, message) => {
                         payload.push(`M${mNumber}_${isON ? 'ON' : 'OFF'}`);
                     }
                 }
-                
+
                 if (yVal !== -1) {
                     for (let i = 0; i <= 7; i++) {
                         let isON = (yVal & (1 << i)) !== 0;
@@ -404,16 +404,47 @@ mqttClient.on('message', (topic, message) => {
                     }
                 }
 
-                // [CỐT LÕI]: Không báo M100_ON mù quáng nữa. Chỉ ĐÁNH THỨC vòng lặp pollM100.
+                // KIỂM CHỨNG LADDER BẰNG SUY LUẬN LOGIC
                 if (touchedMotorSwitch) {
                     let isM1_ON = (cachedMState & (1 << 1)) !== 0;
                     let isM2_ON = (cachedMState & (1 << 2)) !== 0;
 
                     if (isM1_ON || isM2_ON) {
-                        shouldPollM100 = true; 
-                        console.log(`⏳ [MOTOR WAIT] Đã ghi lệnh băm xung. Đánh thức vòng lặp đọc M100 để xác nhận...`);
+                        await delay(120); // Đợi PLC kích hoạt lệnh DRVI
+
+                        // Thăm dò lần 1
+                        let m100On = await readM100State(true);
+
+                        // Lọc nhiễu: Nếu bị Timeout (null), ta thử hỏi nhanh thêm 1 lần nữa cho chắc
+                        if (m100On === null) {
+                            m100On = await readM100State(true);
+                        }
+
+                        // Nếu PLC rảnh rỗi và trả lời ngay M100=0 -> CHƯA NẠP CODE HOẶC NẠP SAI!
+                        if (m100On === false) {
+                            console.log(`⚠️ [VERIFY] PLC trả lời M100=0. (Sinh viên chưa nạp code Ladder!)`);
+                            cachedM100State = false;
+                            shouldPollM100 = false;
+                            payload.push('M100_OFF');
+                        }
+                        // Nếu bắt được 16 (true) HOẶC bị Timeout kép (null) ngay sau khi Ghi thành công
+                        // -> CHẮC CHẮN ĐANG BĂM XUNG! Giao lại việc đếm giờ cho Unity.
+                        else {
+                            console.log(`🚀 [VERIFY] ${m100On === true ? 'Đọc được 16' : 'Timeout kép'} -> Motor chạy! Báo Unity tự đếm giờ.`);
+                            cachedM100State = true;
+                            shouldPollM100 = true; // Bật cờ ngầm để sau này Gateway còn biết đường báo M100_OFF
+
+                            let pulses = Math.abs(cachedD[100]) > 0 ? Math.abs(cachedD[100]) : 3200;
+                            let freq = Math.abs(cachedD[102]) > 0 ? Math.abs(cachedD[102]) : 1600;
+                            let signedPulses = isM2_ON ? -pulses : pulses;
+
+                            // Đẩy thông số sang cho thuật toán AutoSpinRoutine() của Unity
+                            payload.push(`D100:${signedPulses}`);
+                            payload.push(`D102:${freq}`);
+                            payload.push('M100_ON');
+                        }
                     } else {
-                        // Nút tắt -> Báo dừng lập tức, dập tắt vòng quét
+                        // Nút tắt
                         cachedM100State = false;
                         shouldPollM100 = false;
                         payload.push('M100_OFF');
@@ -444,19 +475,19 @@ async function pollM100() {
         if (!port.isOpen || !shouldPollM100) return;
 
         // Đọc M100 trong yên lặng
-        let m100On = await readM100State(true); 
+        let m100On = await readM100State(true);
 
         if (m100On !== null) {
             // [CỐT LÕI]: Chỉ báo Unity quay khi THỰC SỰ đọc được VALUE = 16 (m100On = true)
             if (m100On !== cachedM100State) {
                 cachedM100State = m100On;
-                
+
                 if (m100On) {
                     let isM2_ON = (cachedMState & (1 << 2)) !== 0;
                     let pulses = Math.abs(cachedD[100]) > 0 ? Math.abs(cachedD[100]) : 3200;
                     let freq = Math.abs(cachedD[102]) > 0 ? Math.abs(cachedD[102]) : 1600;
                     let signedPulses = isM2_ON ? -pulses : pulses;
-                    
+
                     let payloadStr = `D100:${signedPulses},D102:${freq},M100_ON`;
                     mqttClient.publish('iot/lab602/dieu_khien_plc/status', payloadStr);
                     console.log(`\n🚀 [REAL SIGNAL] Đọc được M100=16 thật từ cáp! Báo Unity quay (${payloadStr}).`);
@@ -471,11 +502,11 @@ async function pollM100() {
             // đến khi nào nhặt được đúng số 16 thì mới kích hoạt khối lệnh (m100On) bên trên.
         }
     };
-    
+
     pollTask.isAutoPoll = true;
     actionQueue.push(pollTask);
     await processActionQueue();
-    
+
     setTimeout(pollM100, 800);
 }
 pollM100();
