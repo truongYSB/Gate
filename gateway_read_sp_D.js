@@ -10,6 +10,7 @@ const PLC_PORT_NAME = 'COM4';
 
 let cachedMState = 0;
 let cachedM100State = false;
+let cachedD = { 100: 3200, 102: 1600 };
 const TARGET_D_REGISTERS = [100, 102];
 
 // Cờ điều khiển chỉ quét M100 khi Motor được kích hoạt (Giúp dùng chung Gateway cho bài Đèn)
@@ -261,8 +262,7 @@ async function processActionQueue() {
         let action = actionQueue.shift();
         try {
             await action();
-            // BẮT BUỘC: Nghỉ 80ms giữa 2 phiên truyền Serial để cổng phụ RS232 của PLC kịp đóng khung!
-            await delay(80);
+            await delay(80); // BẮT BUỘC: Nghỉ 80ms để cổng RS232 kịp đóng khung
         } catch (e) {
             console.error("❌ Lỗi Queue:", e);
         }
@@ -312,8 +312,9 @@ mqttClient.on('message', (topic, message) => {
             actionQueue.push(async () => {
                 if (!port.isOpen) return;
                 await writeDRegister(100, tPulse);
-                await delay(50);
                 await writeDRegister(102, tFreq);
+                cachedD[100] = tPulse; // CẬP NHẬT CACHE
+                cachedD[102] = tFreq;
                 mqttClient.publish('iot/lab602/dieu_khien_plc/status', 'PARAM_SET_DONE');
             });
             processActionQueue();
@@ -335,8 +336,11 @@ mqttClient.on('message', (topic, message) => {
             let dValues = [];
             for (let dNum of TARGET_D_REGISTERS) {
                 let dVal = await readDRegister(dNum);
-                if (dVal !== null) dValues.push(`D${dNum}:${dVal}`);
-                await delay(60);
+                if (dVal !== null) {
+                    cachedD[dNum] = dVal; // LƯU VÀO CACHE
+                    dValues.push(`D${dNum}:${dVal}`);
+                }
+                await delay(50);
             }
 
             if (mVal !== -1 && yVal !== -1) {
@@ -464,38 +468,45 @@ app.listen(5003, () => { console.log("🚀 Gateway HTTP API đang chạy ở c�
 // HỆ THỐNG GIÁM SÁT CỜ M100 THÔNG MINH (CHỈ QUÉT KHI MOTOR ĐANG CHẠY)
 // ==========================================
 async function pollM100() {
-    // Nếu motor đang KHÔNG chạy (hoặc đang ở bài Bật Đèn), hoặc Queue đang bận -> Không làm phiền cổng COM!
-    if (!shouldPollM100 || isProcessing) {
-        setTimeout(pollM100, 400);
+    if (isProcessing) {
+        setTimeout(pollM100, 300);
         return;
     }
 
-    const pollTask = async () => {
-        if (!port.isOpen || !shouldPollM100) return;
+    isPollingM100 = true;
+    actionQueue.push(async () => {
+        if (!port.isOpen) return;
 
         let m100On = await readM100State();
 
         if (m100On !== null && m100On !== cachedM100State) {
             cachedM100State = m100On;
-            let stateStr = m100On ? 'ON' : 'OFF';
 
-            mqttClient.publish('iot/lab602/dieu_khien_plc/status', `M100_${stateStr}`);
-            console.log(`\n🔄 [AUTO UPDATE] Trạng thái Motor: M100_${stateStr}`);
+            if (m100On) {
+                // Xác định chiều quay dựa vào M1 và M2 đang ON hay OFF
+                let isM2_ON = (cachedMState & (1 << 2)) !== 0;
+                let pulses = cachedD[100] || 3200;
+                let freq = cachedD[102] || 1600;
 
-            // Ngay khi phát hiện Motor đã tự dừng (M100 về OFF) -> Ngừng quét tự động luôn!
-            if (!m100On) {
-                shouldPollM100 = false;
-                console.log("🛑 [AUTO POLL] Motor đã dừng. Tắt quét M100 để giải phóng cổng COM.");
+                // M2 ON thì quay ngược (xung âm)
+                let signedPulses = isM2_ON ? -Math.abs(pulses) : Math.abs(pulses);
+
+                // Bơm trực tiếp D100 và D102 vào bản tin M100_ON
+                let payloadStr = `M100_ON,D100:${signedPulses},D102:${freq}`;
+                mqttClient.publish('iot/lab602/dieu_khien_plc/status', payloadStr);
+                console.log(`\n🔄 [AUTO UPDATE] Trạng thái Motor: ${payloadStr}`);
+            } else {
+                mqttClient.publish('iot/lab602/dieu_khien_plc/status', `M100_OFF`);
+                console.log(`\n🔄 [AUTO UPDATE] Trạng thái Motor: M100_OFF`);
             }
         }
-    };
-    pollTask.isAutoPoll = true; // Đánh dấu để nhường đường ngay lập tức nếu người dùng bấm nút
+    });
 
-    actionQueue.push(pollTask);
     await processActionQueue();
+    isPollingM100 = false;
 
-    // Quét nhịp 600ms/lần để cổng phụ RS232 hoàn toàn thoải mái khi PLC đang băm xung
-    setTimeout(pollM100, 600);
+    // Giãn khoảng cách hỏi PLC ra 800ms để chống Timeout khi DRVI đang chạy
+    setTimeout(pollM100, 800);
 }
 
 pollM100();
