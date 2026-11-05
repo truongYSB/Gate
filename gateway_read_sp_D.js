@@ -357,7 +357,9 @@ mqttClient.on('message', (topic, message) => {
             let payload = [];
             let hasError = false;
             let newMVal = cachedMState;
+
             let touchedMotorSwitch = false;
+            let isMotorStartCommand = false; // Cờ kiểm tra xem có lệnh BẬT motor không
 
             for (let cmd of commands) {
                 let cleanCmd = cmd.trim();
@@ -366,12 +368,37 @@ mqttClient.on('message', (topic, message) => {
                 let mNumber = parseInt(mName.replace('M', ''));
 
                 if (mNumber >= 0 && mNumber <= 7) {
-                    if (state === "ON") newMVal |= (1 << mNumber);
-                    else newMVal &= ~(1 << mNumber);
+                    if (state === "ON") {
+                        newMVal |= (1 << mNumber);
+                        // KHI CÓ LỆNH BẬT M1 HOẶC M2
+                        if (mNumber === 1 || mNumber === 2) isMotorStartCommand = true;
+                    }
+                    else {
+                        newMVal &= ~(1 << mNumber);
+                    }
+
                     if (mNumber === 1 || mNumber === 2) touchedMotorSwitch = true;
                 }
             }
 
+            // ========================================================
+            // [Ý TƯỞNG CỦA BẠN]: ĐỌC TRƯỚC (PRE-FETCH) D100 & D102
+            // Lúc này lệnh ON chưa được gửi, PLC đang 100% rảnh rỗi!
+            // ========================================================
+            if (isMotorStartCommand) {
+                console.log(`\n⏳ [PRE-FETCH] Đang đọc trước cấu hình D100, D102 trước khi kích hoạt...`);
+                let preD100 = await readDRegister(100, true);
+                if (preD100 !== null) cachedD[100] = preD100;
+
+                let preD102 = await readDRegister(102, true);
+                if (preD102 !== null) cachedD[102] = preD102;
+
+                console.log(`✅ [PRE-FETCH] Xong! Cấu hình hiện tại: D100=${cachedD[100]}, D102=${cachedD[102]}`);
+            }
+
+            // ========================================================
+            // SAU KHI CHUẨN BỊ XONG, BẮT ĐẦU GHI LỆNH XUỐNG PLC
+            // ========================================================
             if (newMVal !== cachedMState) {
                 let success = await writeMByte(newMVal);
                 if (!success) hasError = true;
@@ -386,6 +413,7 @@ mqttClient.on('message', (topic, message) => {
             if (hasError) {
                 payload.push('ACTION_FAILED');
             } else {
+                // Đóng gói trạng thái của M và Y
                 for (let cmd of commands) {
                     let cleanCmd = cmd.trim();
                     if (!cleanCmd) continue;
@@ -404,7 +432,9 @@ mqttClient.on('message', (topic, message) => {
                     }
                 }
 
-                // KIỂM CHỨNG LADDER BẰNG SUY LUẬN LOGIC
+                // ========================================================
+                // KIỂM CHỨNG LADDER VÀ XUẤT LỆNH CHO UNITY
+                // ========================================================
                 if (touchedMotorSwitch) {
                     let isM1_ON = (cachedMState & (1 << 1)) !== 0;
                     let isM2_ON = (cachedMState & (1 << 2)) !== 0;
@@ -415,7 +445,7 @@ mqttClient.on('message', (topic, message) => {
                         // Thăm dò lần 1
                         let m100On = await readM100State(true);
 
-                        // Lọc nhiễu: Nếu bị Timeout (null), ta thử hỏi nhanh thêm 1 lần nữa cho chắc
+                        // Lọc nhiễu: Nếu bị Timeout (null), hỏi nhanh thêm 1 lần nữa cho chắc
                         if (m100On === null) {
                             m100On = await readM100State(true);
                         }
@@ -427,20 +457,18 @@ mqttClient.on('message', (topic, message) => {
                             shouldPollM100 = false;
                             payload.push('M100_OFF');
                         }
-                        // Nếu bắt được 16 (true) HOẶC bị Timeout kép (null) ngay sau khi Ghi thành công
-                        // -> CHẮC CHẮN ĐANG BĂM XUNG! Giao lại việc đếm giờ cho Unity.
+                        // Đang băm xung thật! Sử dụng thông số đã Pre-fetch ở trên đưa cho Unity
                         else {
-                            console.log(`🚀 [VERIFY] ${m100On === true ? 'Đọc được 16' : 'Timeout kép'} -> Motor chạy! Báo Unity tự đếm giờ.`);
+                            console.log(`🚀 [VERIFY] Xác nhận PLC đang băm xung! Gửi thông số Pre-fetch cho Unity.`);
                             cachedM100State = true;
-                            shouldPollM100 = true; // Bật cờ ngầm để sau này Gateway còn biết đường báo M100_OFF
+                            shouldPollM100 = true;
 
-                            let pulses = Math.abs(cachedD[100]) > 0 ? Math.abs(cachedD[100]) : 3200;
-                            let freq = Math.abs(cachedD[102]) > 0 ? Math.abs(cachedD[102]) : 1600;
-                            let signedPulses = isM2_ON ? -pulses : pulses;
+                            // Lấy trực tiếp thông số chuẩn 100% đã đọc được ở đầu khối lệnh
+                            let realD100 = cachedD[100] !== undefined ? cachedD[100] : 3200;
+                            let realD102 = cachedD[102] > 0 ? cachedD[102] : 1600;
 
-                            // Đẩy thông số sang cho thuật toán AutoSpinRoutine() của Unity
-                            payload.push(`D100:${signedPulses}`);
-                            payload.push(`D102:${freq}`);
+                            payload.push(`D100:${realD100}`);
+                            payload.push(`D102:${realD102}`);
                             payload.push('M100_ON');
                         }
                     } else {
